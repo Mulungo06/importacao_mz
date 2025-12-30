@@ -2,31 +2,14 @@
 # Autor: Domingos Mulungo
 # Objetivo: Apoiar decisão (o que importar, quanto e quando) com KPIs, alertas e simulação.
 #
-# ✅ Este ficheiro funciona em 2 modos:
-#   1) STREAMLIT (se "streamlit" estiver instalado): interface web interativa.
-#   2) OFFLINE/CLI (se "streamlit" NÃO estiver instalado): gera um relatório HTML + gráficos.
-#
-# Principais melhorias nesta versão:
-# - Se for executado em modo offline sem argumentos, **assume --demo por padrão** (evita SystemExit).
-# - Mensagens de ajuda mais claras quando faltarem ficheiros.
-# - Mantém testes e adiciona novos testes.
-#
-# Como executar:
-#   - Streamlit (se instalado):
-#       streamlit run app.py
-#
-#   - Offline/CLI (sem streamlit):
-#       # 1) Com dados reais
-#       python app.py --produtos produtos.csv --custos custos.csv --vendas vendas.csv --stock stock.csv
-#       # 2) Com dados de demonstração (recomendado para testar)
-#       python app.py --demo
-#       # 3) Sem argumentos (AGORA funciona: assume --demo)
-#       python app.py
+# ✅ Versão atualizada (pedido do utilizador):
+# 1) Dados de teste/demo REMOVIDOS do código principal (ficheiro demo fica em Excel).
+# 2) Apenas UM upload na UI (ficheiro único).
+# 3) App lê tudo a partir de um único Excel/CSV e calcula todas as métricas.
 
 from __future__ import annotations
 
 import argparse
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Tuple
@@ -39,18 +22,19 @@ import pandas as pd
 # ----------------------------
 try:
     import streamlit as st  # type: ignore
-
     STREAMLIT_AVAILABLE = True
 except ModuleNotFoundError:
     st = None  # type: ignore
     STREAMLIT_AVAILABLE = False
-
 
 # ============================
 # Config / Defaults
 # ============================
 DEFAULT_OUTDIR = Path("outputs")
 DEFAULT_OUTDIR.mkdir(parents=True, exist_ok=True)
+
+# Ficheiro demo incluído no repositório (coloque na raiz do repo, junto do app.py)
+DEMO_BUNDLE_PATH = Path(__file__).with_name("demo_importacao_unico.xlsx")
 
 REQUIRED_COLS = {
     "produtos": {"produto_id", "nome_produto"},
@@ -63,7 +47,6 @@ REQUIRED_COLS = {
 # ============================
 # Core logic (independente de UI)
 # ============================
-
 def load_data(path_or_file) -> pd.DataFrame:
     """Carrega CSV/XLSX a partir de um path (CLI) ou file-like (Streamlit)."""
     name = getattr(path_or_file, "name", None)
@@ -77,8 +60,9 @@ def load_data(path_or_file) -> pd.DataFrame:
         return pd.read_excel(path_or_file)
     raise ValueError(f"Formato não suportado: {name}. Use .csv ou .xlsx")
 
-def load_bundle(single_file):
-    """Carrega os 4 dataframes (produtos, custos, vendas, stock) a partir de UM ficheiro.
+
+def load_bundle(single_file) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Carrega produtos, custos, vendas, stock a partir de UM ficheiro.
 
     Suporta 2 formatos:
       A) Excel com 4 abas chamadas: produtos, custos, vendas, stock
@@ -102,12 +86,14 @@ def load_bundle(single_file):
                 stock = xl.parse(sheets["stock"])
                 return produtos, custos, vendas, stock
         except Exception:
+            # cai para modo flat
             pass
 
     # B) Tabela flat
     df = load_data(single_file)
     required_flat = {
-        "produto_id","nome_produto","custo_total","data","quantidade","preco_venda","stock_atual","stock_min"
+        "produto_id", "nome_produto", "custo_total", "data",
+        "quantidade", "preco_venda", "stock_atual", "stock_min",
     }
     missing = required_flat - set(df.columns)
     if missing:
@@ -115,20 +101,19 @@ def load_bundle(single_file):
             "Ficheiro único não tem abas 'produtos/custos/vendas/stock' nem contém a tabela 'flat' completa. "
             f"Faltam colunas: {sorted(missing)}"
         )
-    produtos = df[["produto_id","nome_produto"]].drop_duplicates("produto_id")
-    custos = df[["produto_id","custo_total"]].drop_duplicates("produto_id")
-    stock = df[["produto_id","stock_atual","stock_min"]].drop_duplicates("produto_id")
-    vendas = df[["produto_id","data","quantidade","preco_venda"]].copy()
+
+    produtos = df[["produto_id", "nome_produto"]].drop_duplicates("produto_id")
+    custos = df[["produto_id", "custo_total"]].drop_duplicates("produto_id")
+    stock = df[["produto_id", "stock_atual", "stock_min"]].drop_duplicates("produto_id")
+    vendas = df[["produto_id", "data", "quantidade", "preco_venda"]].copy()
     return produtos, custos, vendas, stock
-
-
 
 
 def validate_columns(df: pd.DataFrame, required: set[str], label: str) -> None:
     missing = required - set(df.columns)
     if missing:
         raise ValueError(
-            f"O ficheiro '{label}' está a faltar colunas obrigatórias: {sorted(missing)}. "
+            f"O dataset '{label}' está a faltar colunas obrigatórias: {sorted(missing)}. "
             f"Colunas disponíveis: {sorted(df.columns)}"
         )
 
@@ -165,7 +150,7 @@ def prepare_dataset(
         if df[col].isna().any():
             raise ValueError(
                 f"Após o merge, existem valores em falta na coluna '{col}'. "
-                "Verifique se todos os 'produto_id' batem entre os ficheiros."
+                "Verifique se todos os 'produto_id' batem entre as abas/linhas."
             )
 
     # Métricas
@@ -251,10 +236,29 @@ def simulate_profit(df: pd.DataFrame, nome_produto: str, quantidade: int) -> flo
     return float(quantidade * (p["preco_venda"] - p["custo_total"]))
 
 
+def load_demo_bundle() -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Carrega o ficheiro demo incluído no repo."""
+    if not DEMO_BUNDLE_PATH.exists():
+        raise FileNotFoundError(
+            f"Ficheiro demo não encontrado em: {DEMO_BUNDLE_PATH}. "
+            "Coloque 'demo_importacao_unico.xlsx' na mesma pasta do app.py."
+        )
+    xl = pd.ExcelFile(DEMO_BUNDLE_PATH)
+    sheets = {s.strip().lower(): s for s in xl.sheet_names}
+    needed = {"produtos", "custos", "vendas", "stock"}
+    if not needed.issubset(set(sheets.keys())):
+        raise ValueError("O ficheiro demo precisa das abas: produtos, custos, vendas, stock.")
+    return (
+        xl.parse(sheets["produtos"]),
+        xl.parse(sheets["custos"]),
+        xl.parse(sheets["vendas"]),
+        xl.parse(sheets["stock"]),
+    )
+
+
 # ============================
 # Offline report (HTML + plots)
 # ============================
-
 def generate_offline_report(df: pd.DataFrame, outdir: Path = DEFAULT_OUTDIR) -> Path:
     """Gera relatório HTML simples + PNGs com matplotlib."""
     import matplotlib.pyplot as plt
@@ -327,7 +331,6 @@ def generate_offline_report(df: pd.DataFrame, outdir: Path = DEFAULT_OUTDIR) -> 
 </body>
 </html>
 """
-
     report_path = outdir / "relatorio_importacao.html"
     report_path.write_text(html, encoding="utf-8")
     return report_path
@@ -336,7 +339,6 @@ def generate_offline_report(df: pd.DataFrame, outdir: Path = DEFAULT_OUTDIR) -> 
 # ============================
 # Streamlit app
 # ============================
-
 def run_streamlit_app() -> None:
     assert st is not None
 
@@ -344,28 +346,33 @@ def run_streamlit_app() -> None:
     st.title("📦 Dashboard de Importação Orientada por Dados")
     st.markdown("Apoio à decisão: **o que importar, quanto importar e quando importar**")
 
-    st.sidebar.header("📂 Carregar dados")
-    produtos_file = st.sidebar.file_uploader("Produtos", type=["xlsx", "csv"])
-    custos_file = st.sidebar.file_uploader("Custos de Importação", type=["xlsx", "csv"])
-    vendas_file = st.sidebar.file_uploader("Vendas", type=["xlsx", "csv"])
-    stock_file = st.sidebar.file_uploader("Stock", type=["xlsx", "csv"])
-
-    demo = st.sidebar.checkbox("Usar dados de demonstração", value=False)
+    st.sidebar.header("📂 Carregar dados (1 ficheiro)")
+    bundle_file = st.sidebar.file_uploader(
+        "Ficheiro único (Excel/CSV)",
+        type=["xlsx", "xls", "csv"],
+        help="Excel com abas produtos/custos/vendas/stock OU tabela flat com colunas mínimas.",
+    )
+    demo = st.sidebar.checkbox("Usar ficheiro demo (incluído no repo)", value=False)
 
     @st.cache_data
-    def _load(file):
-        return load_data(file)
+    def _load_bundle(file_obj):
+        return load_bundle(file_obj)
 
     if demo:
-        produtos, custos, vendas, stock = make_demo_data()
-    elif produtos_file and custos_file and vendas_file and stock_file:
-        produtos = _load(produtos_file)
-        custos = _load(custos_file)
-        vendas = _load(vendas_file)
-        stock = _load(stock_file)
+        try:
+            produtos, custos, vendas, stock = load_demo_bundle()
+        except Exception as e:
+            st.error(f"Não foi possível carregar o demo: {e}")
+            return
     else:
-        st.info("⬅️ Carregue os 4 ficheiros (ou ative dados de demonstração).")
-        return
+        if not bundle_file:
+            st.info("⬅️ Faça upload de UM ficheiro (ou ative o demo).")
+            return
+        try:
+            produtos, custos, vendas, stock = _load_bundle(bundle_file)
+        except Exception as e:
+            st.error(f"Erro ao ler ficheiro único: {e}")
+            return
 
     try:
         df = prepare_dataset(produtos, custos, vendas, stock)
@@ -408,169 +415,32 @@ def run_streamlit_app() -> None:
 
 
 # ============================
-# Demo data
+# CLI entrypoint (modo offline)
 # ============================
-
-def make_demo_data(seed: int = 7) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    rng = np.random.default_rng(seed)
-
-    produtos = pd.DataFrame(
-        {
-            "produto_id": np.arange(1, 11),
-            "nome_produto": [
-                "Powerbank 20k",
-                "Auriculares BT",
-                "Cabo USB-C",
-                "Carregador 20W",
-                "Teclado",
-                "Mouse",
-                "Smartwatch",
-                "Ring light",
-                "Tripé",
-                "Adaptador",
-            ],
-        }
-    )
-
-    custos = pd.DataFrame(
-        {
-            "produto_id": produtos["produto_id"],
-            "custo_total": rng.uniform(120, 900, size=len(produtos)).round(2),
-        }
-    )
-
-    dates = pd.date_range("2025-09-01", periods=90, freq="D")
-    rows = []
-    for d in dates:
-        for pid in produtos["produto_id"]:
-            if rng.random() < 0.30:
-                continue
-            qtd = int(rng.integers(1, 15))
-            custo = float(custos.loc[custos["produto_id"] == pid, "custo_total"].iloc[0])
-            markup = float(rng.uniform(1.2, 1.9))
-            preco = round(custo * markup, 2)
-            rows.append((pid, d, qtd, preco))
-
-    vendas = pd.DataFrame(rows, columns=["produto_id", "data", "quantidade", "preco_venda"])
-
-    stock = pd.DataFrame(
-        {
-            "produto_id": produtos["produto_id"],
-            "stock_atual": rng.integers(0, 250, size=len(produtos)),
-            "stock_min": rng.integers(20, 80, size=len(produtos)),
-        }
-    )
-
-    return produtos, custos, vendas, stock
-
-
-# ============================
-# Tests (executar: python app.py --run-tests)
-# ============================
-
-def _run_tests() -> None:
-    # Teste 1: demo data gera dataset sem NaNs críticos
-    produtos, custos, vendas, stock = make_demo_data(seed=1)
-    df = prepare_dataset(produtos, custos, vendas, stock)
-    assert df["receita"].ge(0).all()
-    assert df["produto_id"].nunique() == len(produtos)
-
-    # Teste 2: simulate_profit
-    p = df["nome_produto"].iloc[0]
-    profit0 = simulate_profit(df, p, 0)
-    assert profit0 == 0.0
-    profit10 = simulate_profit(df, p, 10)
-    last = df[df["nome_produto"] == p].sort_values("data").tail(1).iloc[0]
-    assert np.isclose(profit10, 10 * (last["preco_venda"] - last["custo_total"]))
-
-    # Teste 3: stock_alerts respeita regra stock_atual <= stock_min
-    stock2 = stock.copy()
-    stock2.loc[0, "stock_atual"] = 0
-    stock2.loc[0, "stock_min"] = 10
-    df2 = prepare_dataset(produtos, custos, vendas, stock2)
-    alerts = stock_alerts(df2)
-    assert (alerts["stock_atual"] <= alerts["stock_min"]).all()
-    assert (alerts["produto_id"] == 1).any()
-
-    # Teste 4: load_data formato inválido
-    try:
-        load_data("ficheiro.txt")
-        assert False, "Era esperado ValueError para formato inválido"
-    except ValueError:
-        pass
-
-    print("✅ Todos os testes passaram.")
-
-
-# ============================
-# CLI entrypoint
-# ============================
-
-def _missing_args_message() -> str:
-    return (
-        "Modo offline precisa de:\n"
-        "  - --demo (para testar com dados gerados)\n"
-        "  OU\n"
-        "  - os 4 ficheiros: --produtos --custos --vendas --stock\n\n"
-        "Exemplos:\n"
-        "  python app.py --demo\n"
-        "  python app.py --produtos produtos.csv --custos custos.csv --vendas vendas.csv --stock stock.csv\n"
-    )
-
-
 def _is_running_in_streamlit() -> bool:
-    """Detecta execução via `streamlit run ...`.
-
-    Importante para deploy no Streamlit Community Cloud: o Streamlit executa o script
-    e `__name__` costuma ser "__main__". Sem esta detecção, o argparse tentaria
-    ler argumentos do Streamlit e falharia.
-    """
     if not STREAMLIT_AVAILABLE:
         return False
     try:
         from streamlit.runtime.scriptrunner import get_script_run_ctx  # type: ignore
-
         return get_script_run_ctx() is not None
     except Exception:
-        # fallback: heurística por argv
         import sys
-
         return any("streamlit" in a.lower() for a in sys.argv)
 
 
 def main_cli() -> None:
-    parser = argparse.ArgumentParser(description="Dashboard de Importação (Streamlit opcional)")
-    parser.add_argument("--produtos", type=str, help="Path para produtos.csv/xlsx")
-    parser.add_argument("--custos", type=str, help="Path para custos.csv/xlsx")
-    parser.add_argument("--vendas", type=str, help="Path para vendas.csv/xlsx")
-    parser.add_argument("--stock", type=str, help="Path para stock.csv/xlsx")
+    parser = argparse.ArgumentParser(description="Dashboard de Importação (1 ficheiro)")
+    parser.add_argument("--bundle", type=str, help="Path para Excel/CSV único")
     parser.add_argument("--outdir", type=str, default=str(DEFAULT_OUTDIR), help="Pasta de saída")
-    parser.add_argument("--demo", action="store_true", help="Usar dados de demonstração")
-    parser.add_argument("--run-tests", action="store_true", help="Executar testes básicos")
+    parser.add_argument("--demo", action="store_true", help="Usar demo_importacao_unico.xlsx (no mesmo diretório do app.py)")
     args = parser.parse_args()
-
-    if args.run_tests:
-        _run_tests()
-        return
 
     outdir = Path(args.outdir)
 
-    # ✅ FIX: se o utilizador não passar argumentos nenhuns, assume demo por padrão.
-    no_paths = not (args.produtos or args.custos or args.vendas or args.stock)
-    if no_paths and not args.demo:
-        args.demo = True
-
-    if args.demo:
-        produtos, custos, vendas, stock = make_demo_data()
+    if args.demo or not args.bundle:
+        produtos, custos, vendas, stock = load_demo_bundle()
     else:
-        if not (args.produtos and args.custos and args.vendas and args.stock):
-            parser.print_help()
-            raise SystemExit("\n" + _missing_args_message())
-
-        produtos = load_data(args.produtos)
-        custos = load_data(args.custos)
-        vendas = load_data(args.vendas)
-        stock = load_data(args.stock)
+        produtos, custos, vendas, stock = load_bundle(args.bundle)
 
     df = prepare_dataset(produtos, custos, vendas, stock)
     report = generate_offline_report(df, outdir)
@@ -578,7 +448,6 @@ def main_cli() -> None:
 
 
 def main() -> None:
-    # Se estiver a correr via Streamlit, abre a UI.
     if _is_running_in_streamlit():
         run_streamlit_app()
     else:
@@ -587,3 +456,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
